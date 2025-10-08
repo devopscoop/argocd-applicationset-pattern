@@ -1,0 +1,13 @@
+argocd:
+  project: infrastructure
+  serverSideApply: true
+  syncPhase: platform
+
+application:
+  name: external-secrets
+  namespace: external-secrets
+  chartName: external-secrets
+  chartURL: https://charts.external-secrets.io
+  revision: 0.17.0
+  valuesURL: https://github.com/arturo-builds-infra/argocd-applicationset-pattern
+  valuesRevision: HEAD

@@ -1,0 +1,59 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cluster-core-applications
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  goTemplate: true
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+  generators:
+    - clusters:
+        selector:
+          matchLabels:
+            argocd.argoproj.io/secret-type: cluster
+  template:
+    metadata:
+      name: "cluster-core-{{ .metadata.labels.alias }}"
+      labels:
+        app.kubernetes.io/managed-by: applicationset
+        type: applicationset
+        cluster: "{{ .metadata.labels.alias }}"
+        environment: "{{ .metadata.labels.environment }}"  
+    spec:
+      project: infrastructure
+      destination:
+        server: "{{ .server }}"
+        namespace: "argocd"
+      source:
+        repoURL: "https://github.com/arturo-builds-infra/argocd-applicationset-pattern"
+        targetRevision: "main"
+        path: "applications"
+        plugin:
+          name: argocd-gomplate
+          env:
+            - name: ENVIRONMENT
+              value: "{{ .metadata.labels.environment }}"
+            - name: AWS_ACCOUNT
+              value: "{{ .metadata.labels.awsAccount }}"
+            - name: AWS_REGION
+              value: "{{ .metadata.labels.awsRegion }}"
+            - name: CLUSTER_ALIAS
+              value: "{{ .metadata.labels.alias }}"
+            - name: DESTINATION_SERVER
+              value: "{{ .server }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 1m
