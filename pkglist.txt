@@ -1,0 +1,31 @@
+# Arch Linux package list for argocd-applicationset-pattern — the pacman/AUR
+# equivalent of the Brewfile. Installs every CLI tool used or referenced by
+# this repo.
+#
+# Requires an AUR helper (yay or paru) because gomplate-bin is an AUR package;
+# everything else is in the official repos.
+#
+# Usage:
+#   grep -vE '^(#|$)' pkglist.txt | yay -S --needed -
+#   grep -vE '^(#|$)' pkglist.txt | paru -S --needed -
+
+# argocd — ArgoCD CLI, used by helm_to_argocd_migration.sh and post-migration steps
+argocd
+
+# bash — bootstrap.sh and helm_to_argocd_migration.sh use `#!/usr/bin/env bash`
+bash
+
+# git — cloning and the Quick Start workflow
+git
+
+# gomplate — AUR; local template testing (the pattern's templating engine)
+gomplate-bin
+
+# helm — required by helm_to_argocd_migration.sh
+helm
+
+# jq — JSON parsing in helm_to_argocd_migration.sh
+jq
+
+# kubectl — applying the ApplicationSet and cluster operations
+kubectl
