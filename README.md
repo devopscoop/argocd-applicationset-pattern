@@ -79,6 +79,24 @@ This pattern solves several common problems when managing applications with Argo
 - Cluster secrets registered in ArgoCD with required labels
 - Custom argocd-gomplate-plugin configured (see [Plugin Configuration](#plugin-configuration))
 
+#### Install required packages
+
+This repo ships package manifests that install every local CLI tool it uses (`argocd`, `bash`, `git`, `gomplate`, `helm`, `jq`, `kubectl`):
+
+- macOS, using [Homebrew](https://brew.sh/) and the `Brewfile`:
+
+  ```shell
+  brew bundle
+  ```
+
+- Arch Linux, using the `pkglist.txt`. This requires an AUR helper such as [yay](https://github.com/Jguer/yay) or [paru](https://github.com/Morganamilo/paru), because `gomplate-bin` is an AUR package:
+
+  ```shell
+  grep -vE '^(#|$)' pkglist.txt | yay -S --needed -
+  ```
+
+On other operating systems, install the tools listed above manually.
+
 ### Basic Usage
 
 1. Clone this repository:
