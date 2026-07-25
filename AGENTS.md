@@ -2,6 +2,157 @@
 
 Instructions for AI coding agents working in this repo.
 
+## What this repo is
+
+A GitOps configuration repo: YAML manifests, gomplate templates, and two bash
+scripts. There is no application code, no build, no test suite, and no linter
+config. "Deploying" means committing to the branch the ApplicationSet tracks
+(`main`), so the way to check a change is to render it locally before pushing.
+
+## Architecture: two rendering passes
+
+The chain is longer than the file layout suggests. Read `applicationset.yaml`
+and `applications/application.yaml.tpl` together — neither makes sense alone.
+
+**Pass 1 — app-of-apps.** `applicationset.yaml` defines a *single*
+ApplicationSet (`cluster-core-applications`) with a cluster generator. For each
+registered cluster secret it emits one Application named
+`cluster-core-<alias>`, pointed at the `applications/` directory through the
+`argocd-gomplate` plugin. (The README's "one ApplicationSet per cluster" is
+loose phrasing for this.)
+
+**Pass 2 — child Applications.** Rendering `applications/` runs
+`application.yaml.tpl`, which `file.Walk`s the directory, reads every
+`config.yaml` it finds, and emits one Application manifest per config — with the
+sync-wave annotation, the `argocd-gomplate` plugin block, and the chart
+coordinates from that config. Each child Application then points at
+`applications/<name>`, where the plugin renders `values.yaml.tpl`, runs `helm
+template`, and concatenates `pre` + helm output + `post`.
+
+Consequences worth internalizing:
+
+- **Applications are discovered, never registered.** Adding a directory under
+  `applications/` with a `config.yaml` and a `values.yaml.tpl` is the entire
+  onboarding step. There is no index file to update.
+- **`application.yaml.tpl` executes in the *parent* Application's context**
+  (destination namespace `argocd`); `values.yaml.tpl` / `pre.yaml.tpl` /
+  `post.yaml.tpl` execute in the *child's*. `ARGOCD_APP_*` variables therefore
+  mean different things in the two layers.
+- **Sync waves order child Applications inside the parent's sync**, not
+  resources inside a chart.
+
+## The plugin lives in another repo
+
+`argocd-gomplate` (the sidecar image and its `plugin.yaml`) is at
+<https://github.com/arturo-builds-infra/argocd-gomplate>; ArgoCD's own config is
+at <https://github.com/arturo-builds-infra/argocd-config>. The logic that
+decides *which* files get rendered, in what order, and how pre/helm/post are
+concatenated is there, not here. You cannot reproduce the full pipeline locally
+from this repo alone — only the individual gomplate renders. When rendering
+behaves unexpectedly in-cluster, the repo-server sidecar logs are the source of
+truth:
+
+```bash
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-repo-server -c argocd-gomplate
+```
+
+## Environment variables: the `ARGOCD_ENV_` prefix rule
+
+ArgoCD prefixes every plugin `env` entry with `ARGOCD_ENV_`. A variable declared
+as `- name: AWS_REGION` is read in templates as `.Env.ARGOCD_ENV_AWS_REGION`.
+Variables do **not** inherit down the chain automatically — each layer declares
+its own list.
+
+| Layer | Declared in | Passed |
+|---|---|---|
+| Parent | `applicationset.yaml` | `ENVIRONMENT`, `AWS_ACCOUNT`, `AWS_REGION`, `CLUSTER_ALIAS`, `DESTINATION_SERVER` (from cluster-secret labels) |
+| Child | `applications/application.yaml.tpl` | `HELM_CHART_URL`, `HELM_CHART_NAME`, `HELM_CHART_VERSION`, `ENVIRONMENT`, `AWS_ACCOUNT`, `AWS_REGION`, `CLUSTER_ALIAS`, `APPLICATION_NAMESPACE` |
+
+So **plumbing a new cluster label to an app template takes three edits**: label
+the cluster secret, add the variable to `applicationset.yaml`'s plugin `env`,
+then re-export it in `application.yaml.tpl`'s plugin `env` block. Skipping the
+third leaves the value visible to the app-of-apps template and empty everywhere
+else. Note `DESTINATION_SERVER` is deliberately parent-only, and the target
+namespace reaches child templates as `ARGOCD_ENV_APPLICATION_NAMESPACE` (see
+`applications/external-secrets/post.yaml.tpl`).
+
+Missing variables render as empty strings rather than failing — `gomplate` is
+called through `env.Getenv` / `.Env`, so a typo produces a silently malformed
+manifest, not an error.
+
+## Sync phases are hardcoded in four places
+
+The phase → wave mapping (`bootstrap` 0, `infrastructure` 10, `platform` 20,
+`applications` 30) is an `if/else` chain in `application.yaml.tpl`. Adding or
+renaming a phase means updating all of: that chain, the validation regex in
+`bootstrap.sh` (`validate_params`), the `--sync-phase` line in `show_usage`, and
+the table in `README.md`. An unrecognized `syncPhase` produces an Application
+with *no* sync-wave annotation instead of an error.
+
+## Upstream URLs are hardcoded
+
+`spec.template.spec.source.repoURL` in `applicationset.yaml`, `VALUES_URL` in
+`bootstrap.sh`, and `application.valuesURL` in every `applications/*/config.yaml`
+all point at `https://github.com/arturo-builds-infra/argocd-applicationset-pattern`.
+A fork has to change all of them, including existing app configs.
+
+## Config defaults
+
+`config.yaml`'s `argocd.syncPolicy.prune` and `.selfHeal` both default to `true`
+when absent (`application.yaml.tpl`), and `automated:` is omitted entirely when
+both are false. `bootstrap.sh` mirrors this by writing the `syncPolicy:` block
+only when a value is non-default, so a generated config with no `syncPolicy` key
+is intentional, not incomplete.
+
+## Local verification
+
+There is nothing to run in CI beyond the Claude review workflows, so verify by
+rendering.
+
+Preview the child Applications the app-of-apps pass would generate (run from
+`applications/`, because the template walks `.`):
+
+```bash
+cd applications
+ARGOCD_ENV_ENVIRONMENT=prod \
+ARGOCD_ENV_CLUSTER_ALIAS=test-cluster \
+ARGOCD_ENV_AWS_ACCOUNT=123456789012 \
+ARGOCD_ENV_AWS_REGION=us-west-2 \
+ARGOCD_ENV_DESTINATION_SERVER=https://kubernetes.default.svc \
+  gomplate -f application.yaml.tpl
+```
+
+Render a single application's values (drop `-d env=…` if there is no
+`overrides.yaml`):
+
+```bash
+cd applications/<app>
+ARGOCD_ENV_ENVIRONMENT=prod \
+ARGOCD_ENV_AWS_ACCOUNT=123456789012 \
+ARGOCD_ENV_AWS_REGION=us-west-2 \
+ARGOCD_ENV_CLUSTER_ALIAS=test-cluster \
+ARGOCD_APP_NAME=<app> \
+ARGOCD_ENV_APPLICATION_NAMESPACE=<app> \
+  gomplate -d env=overrides.yaml -f values.yaml.tpl
+```
+
+Then validate the YAML and, when the change affects chart output, the chart:
+
+```bash
+kubectl apply --dry-run=client -f applicationset.yaml
+helm template <app> <chart> --repo <chartURL> --version <revision> -f /tmp/values.yaml
+```
+
+Scaffold a new application rather than hand-writing the directory:
+
+```bash
+./bootstrap.sh <name> --chart-url <url> --chart-version <ver> \
+  --sync-phase infrastructure --create-post
+```
+
+`bootstrap.sh` refuses to overwrite an existing `applications/<name>` directory,
+so re-scaffolding requires deleting it first.
+
 ## Package manifests
 
 This repo ships a `Brewfile` (macOS: `brew bundle`) and a `pkglist.txt` (Arch Linux) that install every local CLI tool the repo uses. Keep them in sync with the code:
